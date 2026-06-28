@@ -196,7 +196,7 @@ def html_page(modo: str) -> str:
             </select>
             <label class="file-btn" id="file-label">
               <input type="file" id="file-input" accept=".pdf">
-              Escolher PDF
+              <span id="file-label-txt">Escolher PDF</span>
             </label>
             <span id="file-name" class="file-name">Nenhum arquivo</span>
           </div>
@@ -483,7 +483,7 @@ async function carregar() {{
 document.getElementById("file-input").addEventListener("change", function() {
   const nm = this.files[0]?.name || "Nenhum arquivo";
   document.getElementById("file-name").textContent = nm;
-  document.getElementById("file-label").textContent = "PDF selecionado ✓";
+  document.getElementById("file-label-txt").textContent = "PDF selecionado ✓";
 });
 
 async function enviarFatura() {
