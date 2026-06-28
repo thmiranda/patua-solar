@@ -647,7 +647,7 @@ async function carregar(){{
     tCom+=c.valor_com_desconto||0;
     tKwh+=c.consumo_faturavel||0;
     tSal+=c.saldo_creditos||0;
-    const relTag=c.data_relatorio?`<span class="tag-rel">✓ ${c.data_relatorio}</span>`:"—";
+    const relTag=c.data_relatorio?`<span class="tag-rel">✓ ${{c.data_relatorio}}</span>`:"—";
     tbody+=`<tr>
       <td><div class="cn">${{nome}}</div><div class="cc">Cód. ${{cf.cod}} · ${{cf.end}}</div></td>
       <td class="r">${{pend?'<span class="note">aguardando fatura</span>':'<span class="vd">'+BRL(c.valor_com_desconto)+'</span>'}}</td>
