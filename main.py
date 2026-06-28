@@ -194,10 +194,10 @@ def html_page(modo: str) -> str:
               <option>Bello Trigo</option>
               <option>Versato</option>
             </select>
-            <label class="file-btn" id="file-label">
-              <input type="file" id="file-input" accept=".pdf">
+            <label class="file-btn" for="file-input">
               <span id="file-label-txt">Escolher PDF</span>
             </label>
+            <input type="file" id="file-input" accept=".pdf" style="display:none">
             <span id="file-name" class="file-name">Nenhum arquivo</span>
           </div>
           <button id="btn-enviar" onclick="enviarFatura()">Processar fatura</button>
