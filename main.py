@@ -1,19 +1,21 @@
 """
-Patuá Solar — Sistema Web Completo v3
+Patuá Solar — Sistema Web Completo v4 (Supabase)
   /gestor → dashboard + upload + relatório
   /usina  → somente leitura
 Deploy: uvicorn main:app --host 0.0.0.0 --port $PORT
 """
 import re, json, os, io
-from pathlib import Path
 from datetime import datetime
 from fastapi import FastAPI, UploadFile, File, Form, HTTPException
 from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse, Response
 import pdfplumber
+from supabase import create_client, Client
 
 app = FastAPI()
-DADOS_PATH = Path("data/dashboard.json")
-DADOS_PATH.parent.mkdir(exist_ok=True)
+
+SUPABASE_URL = os.environ.get("SUPABASE_URL", "https://mrxvcczkshsdpzbmjzwh.supabase.co")
+SUPABASE_KEY = os.environ.get("SUPABASE_KEY", "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Im1yeHZjY3prc2hzZHB6Ym1qendoIiwicm9sZSI6ImFub24iLCJpYXQiOjE3ODI3MDUzNDIsImV4cCI6MjA5ODI4MTM0Mn0.MmON1h6yRnbk9alczXUmaTv4_0Y8CMXyTrMn9em89W0")
+sb: Client = create_client(SUPABASE_URL, SUPABASE_KEY)
 
 CLIENTES_CONFIG = {
     "Real Evolution": {"cod":"2972408-2","end":"SQNW 109",        "tarifa_neo":0.97030,"tarifa_mtec":0.77624,"desconto":0.20,"fim":"Jul/27","prog":68},
@@ -80,20 +82,68 @@ ESTADO_INICIAL = {
     ],
 }
 
-def carregar():
-    if DADOS_PATH.exists():
-        return json.loads(DADOS_PATH.read_text())
-    DADOS_PATH.write_text(json.dumps(ESTADO_INICIAL, ensure_ascii=False, indent=2))
+# ── Supabase: carregar e salvar ───────────────────────────────
+def carregar() -> dict:
+    """Busca o estado atual do Supabase. Se não existir, cria com o estado inicial."""
+    try:
+        res = sb.table("dashboard_estado").select("*").eq("id", 1).single().execute()
+        if res.data:
+            d = res.data
+            # dados e clientes vêm como jsonb — já são dict
+            return {
+                "ref_mes":             d["ref_mes"],
+                "atualizado_em":       d["atualizado_em"],
+                "faturamento_mes":     d["faturamento_mes"],
+                "consumo_mes_kwh":     d["consumo_mes_kwh"],
+                "acumulado_historico": d["acumulado_historico"],
+                "clientes":            d["clientes"],
+                "historico_mensal":    d["historico_mensal"],
+            }
+    except Exception:
+        pass
+
+    # Primeira execução: inicializa no Supabase
+    sb.table("dashboard_estado").insert({
+        "id":                  1,
+        "ref_mes":             ESTADO_INICIAL["ref_mes"],
+        "atualizado_em":       ESTADO_INICIAL["atualizado_em"],
+        "faturamento_mes":     ESTADO_INICIAL["faturamento_mes"],
+        "consumo_mes_kwh":     ESTADO_INICIAL["consumo_mes_kwh"],
+        "acumulado_historico": ESTADO_INICIAL["acumulado_historico"],
+        "clientes":            ESTADO_INICIAL["clientes"],
+        "historico_mensal":    ESTADO_INICIAL["historico_mensal"],
+    }).execute()
     return ESTADO_INICIAL
 
-def salvar(d):
-    DADOS_PATH.write_text(json.dumps(d, ensure_ascii=False, indent=2))
+def salvar(d: dict):
+    """Persiste o estado no Supabase via upsert."""
+    sb.table("dashboard_estado").upsert({
+        "id":                  1,
+        "ref_mes":             d["ref_mes"],
+        "atualizado_em":       d["atualizado_em"],
+        "faturamento_mes":     d["faturamento_mes"],
+        "consumo_mes_kwh":     d["consumo_mes_kwh"],
+        "acumulado_historico": d["acumulado_historico"],
+        "clientes":            d["clientes"],
+        "historico_mensal":    d["historico_mensal"],
+    }).execute()
+
+def registrar_relatorio(cliente: str, ref_mes: str, valor: float, economia: float, consumo: int, saldo: int):
+    """Insere um registro na tabela de log de relatórios emitidos."""
+    sb.table("relatorios_emitidos").insert({
+        "cliente":       cliente,
+        "ref_mes":       ref_mes,
+        "valor_cobrado": valor,
+        "economia":      economia,
+        "consumo_kwh":   consumo,
+        "saldo_creditos":saldo,
+        "emitido_em":    datetime.now().isoformat(),
+    }).execute()
 
 # ── Extração PDF ──────────────────────────────────────────────
 def extrair_pdf(conteudo_bytes: bytes) -> dict:
     with pdfplumber.open(io.BytesIO(conteudo_bytes)) as pdf:
         texto = pdf.pages[0].extract_text()
-    # Normaliza quebras de palavras comuns nas faturas Neoenergia
     texto_norm = re.sub(r'Sal\s+do', 'Saldo', texto)
     texto_norm = re.sub(r'Sa\s+ldo', 'Saldo', texto_norm)
 
@@ -112,7 +162,6 @@ def extrair_pdf(conteudo_bytes: bytes) -> dict:
     if m:
         d["saldo_proximo_ciclo"] = int(float(m.group(1).replace(',','.')))
 
-    # Código do cliente — tenta múltiplos padrões de endereço
     m = re.search(r'(\d{6,7})\s+chave', texto_norm)
     d["cod_cliente"] = m.group(1) if m else None
 
@@ -270,7 +319,6 @@ async def api_upload(cliente: str = Form(...), fatura: UploadFile = File(...)):
     calc  = calcular(dados_pdf, cfg)
     label = ref_label(calc["ref_mes"])
 
-    # ── Bloqueio de duplicata ─────────────────────────────────
     d = carregar()
     c = d["clientes"][cliente]
     if c.get("ref_mes") == label and c.get("data_relatorio"):
@@ -286,7 +334,7 @@ async def api_upload(cliente: str = Form(...), fatura: UploadFile = File(...)):
         "ref_mes":             label,
         "status":              "ativo",
         "data_fatura":         datetime.now().strftime("%d/%m/%Y %H:%M"),
-        "data_relatorio":      None,  # reset ao carregar nova fatura
+        "data_relatorio":      None,
     })
 
     ativos = [cl for cl in d["clientes"].values() if cl.get("status") == "ativo" and cl.get("ref_mes") == label]
@@ -319,7 +367,6 @@ async def api_relatorio(cliente: str = Form(...), observacoes: str = Form("")):
     if cliente not in CLIENTES_CONFIG:
         raise HTTPException(400, f"Cliente '{cliente}' não encontrado")
 
-    # ── Bloqueio de duplicata ─────────────────────────────────
     d = carregar()
     c = d["clientes"].get(cliente, {})
     if c.get("data_relatorio"):
@@ -332,9 +379,20 @@ async def api_relatorio(cliente: str = Form(...), observacoes: str = Form("")):
     except Exception as e:
         raise HTTPException(500, f"Erro ao gerar PDF: {e}")
 
-    # Marca relatório como emitido
-    c["data_relatorio"] = datetime.now().strftime("%d/%m/%Y %H:%M")
+    agora = datetime.now().strftime("%d/%m/%Y %H:%M")
+    c["data_relatorio"] = agora
     salvar(d)
+
+    # ── Registro permanente do relatório emitido ──────────────
+    economia = round((c["valor_sem_desconto"] or 0) - (c["valor_com_desconto"] or 0), 2)
+    registrar_relatorio(
+        cliente  = cliente,
+        ref_mes  = c.get("ref_mes","—"),
+        valor    = c.get("valor_com_desconto") or 0,
+        economia = economia,
+        consumo  = c.get("consumo_faturavel") or 0,
+        saldo    = c.get("saldo_creditos") or 0,
+    )
 
     nome_arquivo = f"Relatorio_{cliente.replace(' ','_')}_{datetime.now().strftime('%Y%m')}.pdf"
     return Response(
@@ -342,6 +400,12 @@ async def api_relatorio(cliente: str = Form(...), observacoes: str = Form("")):
         media_type="application/pdf",
         headers={"Content-Disposition": f'attachment; filename="{nome_arquivo}"'}
     )
+
+@app.get("/api/historico-relatorios")
+def api_historico_relatorios():
+    """Retorna todos os relatórios já emitidos, do mais recente ao mais antigo."""
+    res = sb.table("relatorios_emitidos").select("*").order("emitido_em", desc=True).execute()
+    return JSONResponse(res.data)
 
 # ── HTML ──────────────────────────────────────────────────────
 def html_page(modo: str) -> str:
@@ -393,6 +457,16 @@ def html_page(modo: str) -> str:
         </div>
         <div id="rel-resultado" class="upload-resultado" style="display:none"></div>
       </div>
+    </section>
+    <section>
+      <div class="section-title">Histórico de relatórios emitidos</div>
+      <div class="tbl-wrap"><table>
+        <thead><tr>
+          <th>Cliente</th><th>Mês ref.</th><th class="r">Valor cobrado</th>
+          <th class="r">Economia</th><th class="r">Consumo</th><th>Emitido em</th>
+        </tr></thead>
+        <tbody id="tbody-hist"></tbody>
+      </table></div>
     </section>
     """ if is_gestor else ""
 
@@ -461,6 +535,7 @@ async function gerarRelatorio() {
       res.className = "upload-resultado res-ok";
       res.innerHTML = "✓ Relatório gerado e download iniciado.";
       await carregar();
+      await carregarHistorico();
     }
     res.style.display = "block";
   } catch(e) {
@@ -470,9 +545,33 @@ async function gerarRelatorio() {
   }
   btn.disabled = false; btn.textContent = "Baixar relatório PDF";
 }
+async function carregarHistorico() {
+  const r = await fetch("/api/historico-relatorios");
+  const rows = await r.json();
+  const brl = v => "R$ " + Number(v).toLocaleString("pt-BR",{minimumFractionDigits:2});
+  const kwh = v => Number(v).toLocaleString("pt-BR") + " kWh";
+  let html = "";
+  if (!rows.length) {
+    html = `<tr><td colspan="6" style="text-align:center;color:#9a9a94;padding:20px">Nenhum relatório emitido ainda.</td></tr>`;
+  } else {
+    for (const row of rows) {
+      const dt = new Date(row.emitido_em);
+      const fmt = dt.toLocaleDateString("pt-BR") + " " + dt.toLocaleTimeString("pt-BR",{hour:"2-digit",minute:"2-digit"});
+      html += `<tr>
+        <td><span class="cn">${row.cliente}</span></td>
+        <td>${row.ref_mes}</td>
+        <td class="r"><span class="vd">${brl(row.valor_cobrado)}</span></td>
+        <td class="r" style="color:#2d7a3a;font-weight:600">${brl(row.economia)}</td>
+        <td class="r">${kwh(row.consumo_kwh)}</td>
+        <td>${fmt}</td>
+      </tr>`;
+    }
+  }
+  document.getElementById("tbody-hist").innerHTML = html;
+}
+carregarHistorico();
 """ if is_gestor else ""
 
-    # Abreviações dos nomes para o card de métricas
     ABREV_JS = '{"Real Evolution":"Real Evo.","SQS 314":"SQS 314","Oasis Design":"Oasis","Bello Trigo":"Bello Trigo","Versato":"Versato"}'
 
     return f"""<!DOCTYPE html>
@@ -634,7 +733,6 @@ async function carregar(){{
   document.getElementById("m-kwh").textContent=(d.consumo_mes_kwh||0).toLocaleString("pt-BR");
   document.getElementById("m-acum").textContent=BRL(d.acumulado_historico);
 
-  // Card sub: lista abreviada dos clientes faturados no mês
   const ativos=ORDEM.filter(n=>d.clientes[n]?.status==="ativo"&&d.clientes[n]?.ref_mes===d.ref_mes);
   document.getElementById("m-fat-sub").textContent=
     ativos.length ? ativos.map(n=>ABREV[n]||n).join(" · ") : "Nenhum cliente faturado";
@@ -668,7 +766,7 @@ async function carregar(){{
     const cf=CFG[nome],warn=cf.prog>=85;
     chtml+=`<div class="cc2${{warn?' alert':''}}">
       <div class="ct"><span class="ct-name">${{nome}}</span>
-      <span class="ct-date${{warn?' warn':''}}">${{cf.fim}}</span></div>
+      <span class="ct-date${{warn?' warn':''}}">` + cf.fim + `</span></div>
       <div class="pb"><div class="pf ${{warn?'pf-warn':'pf-ok'}}" style="width:${{cf.prog}}%"></div></div>
     </div>`;
   }}
