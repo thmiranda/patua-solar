@@ -3,3 +3,4 @@ uvicorn[standard]>=0.29.0
 pdfplumber>=0.11.0
 python-multipart>=0.0.9
 weasyprint>=62.0
+supabase>=2.4.0
