@@ -18,12 +18,13 @@ SUPABASE_KEY = os.environ.get("SUPABASE_KEY", "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXV
 sb: Client = create_client(SUPABASE_URL, SUPABASE_KEY)
 
 CLIENTES_CONFIG = {
-    "Real Evolution": {"cod":"2972408-2","end":"SQNW 109",        "tarifa_neo":0.97030,"tarifa_mtec":0.77624,"desconto":0.20,"fim":"Jul/27","prog":68},
-    "SQS 314":        {"cod":"3079816-7","end":"SQS 314",          "tarifa_neo":0.99926,"tarifa_mtec":0.81939,"desconto":0.18,"fim":"Ago/26","prog":90},
-    "Oasis Design":   {"cod":"3079816",  "end":"Águas Claras",     "tarifa_neo":0.95975,"tarifa_mtec":0.76780,"desconto":0.20,"fim":"Mar/27","prog":58},
-    "Bello Trigo":    {"cod":"3140795",  "end":"Jardim Botânico",  "tarifa_neo":0.98049,"tarifa_mtec":0.78439,"desconto":0.20,"fim":"Ago/27","prog":42},
-    "Versato":        {"cod":"—",        "end":"Brasília-DF",      "tarifa_neo":1.03640,"tarifa_mtec":0.82912,"desconto":0.20,"fim":"Ago/27","prog":42},
+    "Real Evolution": {"cod":"2972408-2","cod_instalacao":"1071042","end":"SQNW 109",        "tarifa_neo":0.97030,"tarifa_mtec":0.77624,"desconto":0.20,"fim":"Jul/27","prog":68},
+    "SQS 314":        {"cod":"3079816-7","cod_instalacao":"1815",   "end":"SQS 314",          "tarifa_neo":0.99926,"tarifa_mtec":0.81939,"desconto":0.18,"fim":"Ago/26","prog":90},
+    "Oasis Design":   {"cod":"3079816",  "cod_instalacao":"1214090","end":"Águas Claras",     "tarifa_neo":0.95975,"tarifa_mtec":0.76780,"desconto":0.20,"fim":"Mar/27","prog":58},
+    "Bello Trigo":    {"cod":"3140795",  "cod_instalacao":"1396714","end":"Jardim Botânico",  "tarifa_neo":0.98049,"tarifa_mtec":0.78439,"desconto":0.20,"fim":"Ago/27","prog":42},
+    "Versato":        {"cod":"—",        "cod_instalacao":None,     "end":"Brasília-DF",      "tarifa_neo":1.03640,"tarifa_mtec":0.82912,"desconto":0.20,"fim":"Ago/27","prog":42},
 }
+COD_INSTALACAO_PARA_CLIENTE = {v["cod_instalacao"]: k for k, v in CLIENTES_CONFIG.items() if v["cod_instalacao"]}
 ORDEM = ["Real Evolution","SQS 314","Oasis Design","Bello Trigo","Versato"]
 
 HISTORICO_ECONOMIA = {
@@ -218,6 +219,10 @@ def extrair_pdf(conteudo_bytes: bytes) -> dict:
     if m:
         d["saldo_proximo_ciclo"] = int(float(m.group(1).replace(',','.')))
 
+    m = re.search(r'CÓDIGO DA INSTALAÇÃO\s*(\d{4,8})', texto_norm)
+    if m:
+        d["cod_instalacao"] = m.group(1)
+
     m = re.search(r'(\d{6,7})\s+chave', texto_norm)
     d["cod_cliente"] = m.group(1) if m else None
 
@@ -371,7 +376,25 @@ async def api_upload(cliente: str = Form(...), fatura: UploadFile = File(...)):
     if not dados_pdf.get("saldo_proximo_ciclo"):
         raise HTTPException(422, "Não foi possível extrair o saldo de créditos. Verifique o PDF.")
 
-    cfg   = CLIENTES_CONFIG[cliente]
+    # ── Validação cruzada: a fatura pertence mesmo ao cliente selecionado? ──
+    cfg = CLIENTES_CONFIG[cliente]
+    cod_pdf = dados_pdf.get("cod_instalacao")
+    if cfg.get("cod_instalacao") and cod_pdf:
+        if cod_pdf != cfg["cod_instalacao"]:
+            cliente_correto = COD_INSTALACAO_PARA_CLIENTE.get(cod_pdf)
+            if cliente_correto:
+                raise HTTPException(
+                    422,
+                    f"Esta fatura pertence a {cliente_correto} (código de instalação {cod_pdf}), não a {cliente}. "
+                    f"Selecione {cliente_correto} ou envie a fatura correta."
+                )
+            else:
+                raise HTTPException(
+                    422,
+                    f"Esta fatura tem código de instalação {cod_pdf}, que não corresponde a {cliente} "
+                    f"(esperado: {cfg['cod_instalacao']}). Verifique o arquivo enviado."
+                )
+
     calc  = calcular(dados_pdf, cfg)
     label = ref_label(calc["ref_mes"])
 
@@ -391,6 +414,7 @@ async def api_upload(cliente: str = Form(...), fatura: UploadFile = File(...)):
         "status":              "ativo",
         "data_fatura":         datetime.now().strftime("%d/%m/%Y %H:%M"),
         "data_relatorio":      None,
+        "vencimento_fatura":   calc.get("vencimento"),
     })
 
     ativos = [cl for cl in d["clientes"].values() if cl.get("status") == "ativo" and cl.get("ref_mes") == label]
@@ -463,6 +487,27 @@ def api_historico_relatorios():
     res = sb.table("relatorios_emitidos").select("*").order("emitido_em", desc=True).execute()
     return JSONResponse(res.data)
 
+@app.delete("/api/historico-relatorios/{relatorio_id}")
+def api_excluir_relatorio(relatorio_id: int):
+    """Exclui um relatório do log e libera o cliente para reprocessamento."""
+    res = sb.table("relatorios_emitidos").select("*").eq("id", relatorio_id).execute()
+    if not res.data:
+        raise HTTPException(404, "Relatório não encontrado.")
+    registro = res.data[0]
+    cliente  = registro["cliente"]
+    ref_mes  = registro["ref_mes"]
+
+    sb.table("relatorios_emitidos").delete().eq("id", relatorio_id).execute()
+
+    # Libera o cliente para reprocessar fatura/relatório daquele mês, se ainda for o mês atual dele
+    d = carregar()
+    c = d["clientes"].get(cliente)
+    if c and c.get("ref_mes") == ref_mes:
+        c["data_relatorio"] = None
+        salvar(d)
+
+    return {"ok": True, "cliente": cliente, "ref_mes": ref_mes}
+
 # ── HTML ──────────────────────────────────────────────────────
 def html_page(modo: str) -> str:
     is_gestor = modo == "gestor"
@@ -519,7 +564,7 @@ def html_page(modo: str) -> str:
       <div class="tbl-wrap"><table>
         <thead><tr>
           <th>Cliente</th><th>Mês ref.</th><th class="r">Valor cobrado</th>
-          <th class="r">Economia</th><th class="r">Consumo</th><th>Emitido em</th>
+          <th class="r">Consumo</th><th>Emitido em</th><th class="r">Ação</th>
         </tr></thead>
         <tbody id="tbody-hist"></tbody>
       </table></div>
@@ -617,13 +662,28 @@ async function carregarHistorico() {
         <td><span class="cn">${row.cliente}</span></td>
         <td>${row.ref_mes}</td>
         <td class="r"><span class="vd">${brl(row.valor_cobrado)}</span></td>
-        <td class="r" style="color:#2d7a3a;font-weight:600">${brl(row.economia)}</td>
         <td class="r">${kwh(row.consumo_kwh)}</td>
         <td>${fmt}</td>
+        <td class="r"><button class="btn-excluir-rel" onclick="excluirRelatorio(${row.id})" title="Excluir relatório">Excluir</button></td>
       </tr>`;
     }
   }
   document.getElementById("tbody-hist").innerHTML = html;
+}
+async function excluirRelatorio(id) {
+  if (!confirm("Excluir este relatório? O cliente ficará liberado para reprocessar a fatura.")) return;
+  try {
+    const r = await fetch(`/api/historico-relatorios/${id}`, { method: "DELETE" });
+    if (!r.ok) {
+      const rj = await r.json();
+      alert("Erro: " + (rj.detail || "Falha ao excluir."));
+      return;
+    }
+    await carregarHistorico();
+    await carregar();
+  } catch(e) {
+    alert("Erro de conexão: " + e.message);
+  }
 }
 carregarHistorico();
 """ if is_gestor else ""
@@ -716,6 +776,9 @@ select:focus{{border-color:var(--sol)}}
 .res-label{{opacity:.75}}.res-val{{font-weight:600}}
 .tag-rel{{display:inline-block;font-size:10px;font-weight:600;padding:1px 7px;border-radius:20px;
   background:#e8f5eb;color:#2d7a3a;border:1px solid #b8dbbe}}
+.btn-excluir-rel{{font-size:11px;font-weight:600;padding:5px 12px;border-radius:6px;
+  border:1px solid #f5b8b8;background:#fdeaea;color:#b03030;cursor:pointer}}
+.btn-excluir-rel:hover{{background:#f8d4d4}}
 .footer{{text-align:center;font-size:11px;color:var(--txt3);margin-top:32px;padding-top:18px;border-top:1px solid var(--bord)}}
 </style></head>
 <body>
@@ -746,6 +809,7 @@ select:focus{{border-color:var(--sol)}}
         <th class="r">Consumo (kWh)</th>
         <th class="r">Tarifa Mtec</th>
         <th class="r">Saldo créditos</th>
+        <th>Vencimento</th>
         <th>Emissão fatura</th>
         <th>Contrato</th>
       </tr></thead>
@@ -756,7 +820,7 @@ select:focus{{border-color:var(--sol)}}
         <td class="r" id="t-kwh">—</td>
         <td class="r">—</td>
         <td class="r" id="t-sal">—</td>
-        <td>—</td><td>—</td>
+        <td>—</td><td>—</td><td>—</td>
       </tr></tfoot>
     </table></div>
   </section>
@@ -808,6 +872,7 @@ async function carregar(){{
       <td class="r">${{pend?"—":(c.consumo_faturavel||0).toLocaleString("pt-BR")}}</td>
       <td class="r">${{TAR(cf.tarifa_mtec)}}</td>
       <td class="r">${{pend?"—":KWH(c.saldo_creditos)}}</td>
+      <td>${{pend?"—":(c.vencimento_fatura||"—")}}</td>
       <td>${{pend?"—":relTag}}</td>
       <td><span class="dot ${{pend?'da':'dg'}}"></span>${{pend?"Aguardando":"Ativo"}} · ${{cf.fim}}</td>
     </tr>`;
