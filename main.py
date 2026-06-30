@@ -102,99 +102,192 @@ HISTORICO_ECONOMIA = {
 
 ESTADO_INICIAL = {
     "ref_mes":"Mai/26","atualizado_em":"2026-06-27",
-    "faturamento_mes":59608.31,"consumo_mes_kwh":63861,"acumulado_historico":750899.46,
     "clientes":{
-        "Real Evolution":{"consumo_faturavel":13820,"valor_sem_desconto":13506.58,"valor_com_desconto":13506.58,"saldo_creditos":13820,"ref_mes":"Mai/26","status":"ativo","creditos_utilizados":13920,"tarifa_neo":0.97030,"data_relatorio":None},
-        "SQS 314":       {"consumo_faturavel":3100,"valor_sem_desconto":3197.63,"valor_com_desconto":3197.63,"saldo_creditos":3100,"ref_mes":"Mai/25","status":"ativo","creditos_utilizados":3200,"tarifa_neo":0.99926,"data_relatorio":None},
-        "Oasis Design":  {"consumo_faturavel":20380,"valor_sem_desconto":19655.68,"valor_com_desconto":19655.68,"saldo_creditos":20380,"ref_mes":"Mai/26","status":"ativo","creditos_utilizados":20480,"tarifa_neo":0.95975,"data_relatorio":None},
-        "Bello Trigo":   {"consumo_faturavel":15541,"valor_sem_desconto":15335.84,"valor_com_desconto":15335.84,"saldo_creditos":15541,"ref_mes":"Mai/26","status":"ativo","creditos_utilizados":15641,"tarifa_neo":0.98049,"data_relatorio":None},
-        "Versato":       {"consumo_faturavel":10620,"valor_sem_desconto":11110.21,"valor_com_desconto":11110.21,"saldo_creditos":10620,"ref_mes":"Mai/26","status":"ativo","creditos_utilizados":10720,"tarifa_neo":1.03640,"data_relatorio":None},
+        "Real Evolution":{"consumo_faturavel":13820,"saldo_creditos":13820,"ref_mes":"Mai/26"},
+        "SQS 314":       {"consumo_faturavel":3100, "saldo_creditos":3100, "ref_mes":"Mai/25"},
+        "Oasis Design":  {"consumo_faturavel":20380,"saldo_creditos":20380,"ref_mes":"Mai/26"},
+        "Bello Trigo":   {"consumo_faturavel":15541,"saldo_creditos":15541,"ref_mes":"Mai/26"},
+        "Versato":       {"consumo_faturavel":10620,"saldo_creditos":10620,"ref_mes":"Mai/26"},
     },
-    "historico_mensal":[
-        {"mes":"Mai/24","total":2688.01},
-        {"mes":"Jun/24","total":2458.18},
-        {"mes":"Jul/24","total":2368.25},
-        {"mes":"Ago/24","total":2867.88},
-        {"mes":"Set/24","total":2717.99},
-        {"mes":"Out/24","total":2528.13},
-        {"mes":"Nov/24","total":2668.02},
-        {"mes":"Dez/24","total":18081.46},
-        {"mes":"Jan/25","total":15957.95},
-        {"mes":"Fev/25","total":17261.33},
-        {"mes":"Mar/25","total":15883.36},
-        {"mes":"Abr/25","total":2747.97},
-        {"mes":"Mai/25","total":35438.53},
-        {"mes":"Jun/25","total":33946.94},
-        {"mes":"Jul/25","total":30541.61},
-        {"mes":"Ago/25","total":43972.28},
-        {"mes":"Set/25","total":49678.53},
-        {"mes":"Out/25","total":43214.94},
-        {"mes":"Nov/25","total":55510.02},
-        {"mes":"Dez/25","total":60822.06},
-        {"mes":"Jan/26","total":64261.29},
-        {"mes":"Fev/26","total":59485.2},
-        {"mes":"Mar/26","total":65894.28},
-        {"mes":"Abr/26","total":60296.94},
-        {"mes":"Mai/26","total":59608.31},
-    ],
 }
 
-# ── Supabase: carregar e salvar ───────────────────────────────
-def carregar() -> dict:
-    """Busca o estado atual do Supabase. Se não existir, cria com o estado inicial."""
+# Base fixa: acumulado histórico já faturado até o fim da planilha (Mai/26),
+# por cliente. Soma-se a isso o que entrar via relatórios emitidos depois desse ponto.
+ACUMULADO_BASE_PLANILHA = 750899.45
+
+# Base fixa: histórico mensal consolidado já fechado na planilha (até Mai/26).
+# Meses emitidos via relatório depois disso são adicionados/atualizados por cima.
+HISTORICO_MENSAL_BASE = [
+    {"mes":"Mai/24","total":2688.01},
+    {"mes":"Jun/24","total":2458.18},
+    {"mes":"Jul/24","total":2368.25},
+    {"mes":"Ago/24","total":2867.88},
+    {"mes":"Set/24","total":2717.99},
+    {"mes":"Out/24","total":2528.13},
+    {"mes":"Nov/24","total":2668.02},
+    {"mes":"Dez/24","total":18081.46},
+    {"mes":"Jan/25","total":15957.95},
+    {"mes":"Fev/25","total":17261.33},
+    {"mes":"Mar/25","total":15883.36},
+    {"mes":"Abr/25","total":2747.97},
+    {"mes":"Mai/25","total":35438.53},
+    {"mes":"Jun/25","total":33946.94},
+    {"mes":"Jul/25","total":30541.61},
+    {"mes":"Ago/25","total":43972.28},
+    {"mes":"Set/25","total":49678.53},
+    {"mes":"Out/25","total":43214.94},
+    {"mes":"Nov/25","total":55510.02},
+    {"mes":"Dez/25","total":60822.06},
+    {"mes":"Jan/26","total":64261.29},
+    {"mes":"Fev/26","total":59485.2},
+    {"mes":"Mar/26","total":65894.28},
+    {"mes":"Abr/26","total":60296.94},
+    {"mes":"Mai/26","total":59608.31},
+]
+
+# ── Supabase: estado base (config persistente, não financeiro) ─
+def carregar_base() -> dict:
+    """Busca a configuração base de cada cliente (consumo/saldo herdado da planilha
+    ou do último relatório emitido). Não contém números agregados — esses são calculados."""
     try:
         res = sb.table("dashboard_estado").select("*").eq("id", 1).single().execute()
         if res.data:
-            d = res.data
-            # dados e clientes vêm como jsonb — já são dict
-            return {
-                "ref_mes":             d["ref_mes"],
-                "atualizado_em":       d["atualizado_em"],
-                "faturamento_mes":     d["faturamento_mes"],
-                "consumo_mes_kwh":     d["consumo_mes_kwh"],
-                "acumulado_historico": d["acumulado_historico"],
-                "clientes":            d["clientes"],
-                "historico_mensal":    d["historico_mensal"],
-            }
+            return {"clientes": res.data["clientes"]}
     except Exception:
         pass
 
-    # Primeira execução: inicializa no Supabase
     sb.table("dashboard_estado").insert({
-        "id":                  1,
-        "ref_mes":             ESTADO_INICIAL["ref_mes"],
-        "atualizado_em":       ESTADO_INICIAL["atualizado_em"],
-        "faturamento_mes":     ESTADO_INICIAL["faturamento_mes"],
-        "consumo_mes_kwh":     ESTADO_INICIAL["consumo_mes_kwh"],
-        "acumulado_historico": ESTADO_INICIAL["acumulado_historico"],
-        "clientes":            ESTADO_INICIAL["clientes"],
-        "historico_mensal":    ESTADO_INICIAL["historico_mensal"],
+        "id":       1,
+        "clientes": ESTADO_INICIAL["clientes"],
     }).execute()
-    return ESTADO_INICIAL
+    return {"clientes": ESTADO_INICIAL["clientes"]}
 
-def salvar(d: dict):
-    """Persiste o estado no Supabase via upsert."""
-    sb.table("dashboard_estado").upsert({
-        "id":                  1,
-        "ref_mes":             d["ref_mes"],
-        "atualizado_em":       d["atualizado_em"],
-        "faturamento_mes":     d["faturamento_mes"],
-        "consumo_mes_kwh":     d["consumo_mes_kwh"],
-        "acumulado_historico": d["acumulado_historico"],
-        "clientes":            d["clientes"],
-        "historico_mensal":    d["historico_mensal"],
-    }).execute()
+def salvar_base(clientes: dict):
+    sb.table("dashboard_estado").upsert({"id": 1, "clientes": clientes}).execute()
 
-def registrar_relatorio(cliente: str, ref_mes: str, valor: float, economia: float, consumo: int, saldo: int):
+def listar_relatorios_emitidos() -> list:
+    """Todos os registros da tabela de log, mais recentes primeiro."""
+    res = sb.table("relatorios_emitidos").select("*").order("emitido_em", desc=True).execute()
+    return res.data or []
+
+def ultimos_relatorios_por_cliente(relatorios: list) -> dict:
+    """Reduz a lista completa ao registro mais recente de cada cliente."""
+    out = {}
+    for r in relatorios:  # já vem ordenado desc por emitido_em
+        if r["cliente"] not in out:
+            out[r["cliente"]] = r
+    return out
+
+MESES_PT_IDX = {m:i for i,m in enumerate(["Jan","Fev","Mar","Abr","Mai","Jun","Jul","Ago","Set","Out","Nov","Dez"])}
+def mes_sort_key(label: str):
+    p = label.split("/")
+    return int("20"+p[1])*100 + MESES_PT_IDX.get(p[0], 0)
+
+def carregar() -> dict:
+    """Monta o estado completo do dashboard, calculado dinamicamente:
+    - clientes: dados de contrato (planilha) + override do último relatório emitido
+    - faturamento_mes / consumo_mes_kwh: soma dos relatórios emitidos no mês de referência atual
+    - acumulado_historico: base da planilha + soma de TODOS os relatórios emitidos
+    - historico_mensal: base da planilha, com os meses pós-planilha atualizados pelos relatórios
+    """
+    base       = carregar_base()
+    relatorios = listar_relatorios_emitidos()
+    ultimos    = ultimos_relatorios_por_cliente(relatorios)
+
+    # Mês de referência atual = mês mais recente com relatório emitido, senão o último da planilha
+    if relatorios:
+        ref_mes_atual = max(relatorios, key=lambda r: mes_sort_key(r["ref_mes"]))["ref_mes"]
+    else:
+        ref_mes_atual = ESTADO_INICIAL["ref_mes"]
+
+    # Monta clientes: começa da planilha, sobrepõe com o último relatório de cada um,
+    # e por cima disso, se houver fatura pendente de relatório, ela tem prioridade de exibição.
+    clientes = {}
+    for nome, cfg in base["clientes"].items():
+        ult = ultimos.get(nome)
+        pendente = cfg.get("pendente_relatorio") and cfg.get("valor_com_desconto") is not None
+
+        if pendente:
+            clientes[nome] = {
+                "consumo_faturavel": cfg.get("consumo_faturavel"),
+                "saldo_creditos":    cfg.get("saldo_creditos"),
+                "valor_com_desconto":cfg.get("valor_com_desconto"),
+                "ref_mes":           cfg.get("ref_mes"),
+                "status":            "ativo",
+                "data_relatorio":    None,
+                "vencimento_fatura": cfg.get("vencimento_fatura"),
+                "aguardando_emissao":True,
+            }
+        elif ult:
+            clientes[nome] = {
+                "consumo_faturavel": ult["consumo_kwh"],
+                "saldo_creditos":    ult["saldo_creditos"],
+                "valor_com_desconto":ult["valor_cobrado"],
+                "ref_mes":           ult["ref_mes"],
+                "status":            "ativo",
+                "data_relatorio":    ult["emitido_em"],
+                "vencimento_fatura": ult.get("vencimento_fatura"),
+                "aguardando_emissao":False,
+            }
+        else:
+            clientes[nome] = {
+                "consumo_faturavel": cfg.get("consumo_faturavel"),
+                "saldo_creditos":    cfg.get("saldo_creditos"),
+                "valor_com_desconto":None,
+                "ref_mes":           cfg.get("ref_mes"),
+                "status":            "ativo",
+                "data_relatorio":    None,
+                "vencimento_fatura": None,
+                "aguardando_emissao":False,
+            }
+
+    # Faturamento e consumo do mês = soma dos relatórios cujo ref_mes é o mês atual
+    do_mes = [r for r in relatorios if r["ref_mes"] == ref_mes_atual]
+    faturamento_mes = round(sum(r["valor_cobrado"] for r in do_mes), 2)
+    consumo_mes_kwh = sum(r["consumo_kwh"] for r in do_mes)
+
+    # Acumulado histórico = base da planilha + tudo que já foi emitido (todos os meses, todos os clientes)
+    acumulado_historico = round(ACUMULADO_BASE_PLANILHA + sum(r["valor_cobrado"] for r in relatorios), 2)
+
+    # Histórico mensal = base da planilha, com meses pós-base recalculados pelos relatórios reais
+    por_mes = {}
+    for r in relatorios:
+        por_mes.setdefault(r["ref_mes"], 0)
+        por_mes[r["ref_mes"]] += r["valor_cobrado"]
+
+    hist = [dict(h) for h in HISTORICO_MENSAL_BASE]
+    meses_base = {h["mes"] for h in hist}
+    for mes, total in por_mes.items():
+        if mes in meses_base:
+            # Mês já existe na base (ex: Mai/26 reemitido) — substitui pelo valor real dos relatórios
+            for h in hist:
+                if h["mes"] == mes:
+                    h["total"] = round(total, 2)
+        else:
+            hist.append({"mes": mes, "total": round(total, 2)})
+    hist.sort(key=lambda h: mes_sort_key(h["mes"]))
+
+    return {
+        "ref_mes":             ref_mes_atual,
+        "atualizado_em":       datetime.now().strftime("%d/%m/%Y %H:%M"),
+        "faturamento_mes":     faturamento_mes,
+        "consumo_mes_kwh":     consumo_mes_kwh,
+        "acumulado_historico": acumulado_historico,
+        "clientes":            clientes,
+        "historico_mensal":    hist,
+    }
+
+def registrar_relatorio(cliente: str, ref_mes: str, valor: float, economia: float, consumo: int, saldo: int, vencimento_fatura: str = None):
     """Insere um registro na tabela de log de relatórios emitidos."""
     sb.table("relatorios_emitidos").insert({
-        "cliente":       cliente,
-        "ref_mes":       ref_mes,
-        "valor_cobrado": valor,
-        "economia":      economia,
-        "consumo_kwh":   consumo,
-        "saldo_creditos":saldo,
-        "emitido_em":    datetime.now().isoformat(),
+        "cliente":           cliente,
+        "ref_mes":           ref_mes,
+        "valor_cobrado":     valor,
+        "economia":          economia,
+        "consumo_kwh":       consumo,
+        "saldo_creditos":    saldo,
+        "vencimento_fatura": vencimento_fatura,
+        "emitido_em":        datetime.now().isoformat(),
     }).execute()
 
 # ── Extração PDF ──────────────────────────────────────────────
@@ -251,11 +344,11 @@ def ref_label(ref: str) -> str:
 # ── Geração PDF ───────────────────────────────────────────────
 def gerar_relatorio_pdf(cliente: str, observacoes: str = "") -> bytes:
     from weasyprint import HTML
-    d   = carregar()
-    c   = d["clientes"].get(cliente)
-    cfg = CLIENTES_CONFIG.get(cliente)
-    if not c or not cfg or c.get("status") == "aguardando":
-        raise ValueError("Cliente sem dados processados para gerar relatório.")
+    base = carregar_base()
+    c    = base["clientes"].get(cliente)
+    cfg  = CLIENTES_CONFIG.get(cliente)
+    if not c or not cfg or not c.get("pendente_relatorio") or c.get("valor_com_desconto") is None:
+        raise ValueError("Nenhuma fatura processada aguardando relatório para este cliente. Carregue a fatura primeiro.")
 
     mes        = c.get("ref_mes","—")
     creditos   = c.get("creditos_utilizados") or (c["consumo_faturavel"] + 100)
@@ -398,40 +491,26 @@ async def api_upload(cliente: str = Form(...), fatura: UploadFile = File(...)):
     calc  = calcular(dados_pdf, cfg)
     label = ref_label(calc["ref_mes"])
 
-    d = carregar()
-    c = d["clientes"][cliente]
-    if c.get("ref_mes") == label and c.get("data_relatorio"):
-        raise HTTPException(409, f"Já existe um relatório emitido para {cliente} em {label} ({c['data_relatorio']}). Para reprocessar, cancele o relatório existente primeiro.")
+    base = carregar_base()
+    relatorios = listar_relatorios_emitidos()
+    ultimo = ultimos_relatorios_por_cliente(relatorios).get(cliente)
+    if ultimo and ultimo["ref_mes"] == label:
+        raise HTTPException(409, f"Já existe um relatório emitido para {cliente} em {label}. Para reprocessar, exclua o relatório existente no histórico primeiro.")
 
-    c.update({
-        "consumo_faturavel":   calc["consumo_faturavel"],
-        "valor_sem_desconto":  calc["valor_sem_desconto"],
-        "valor_com_desconto":  calc["valor_com_desconto"],
-        "saldo_creditos":      calc["saldo_creditos"],
-        "creditos_utilizados": dados_pdf["creditos_utilizados"],
-        "tarifa_neo":          cfg["tarifa_neo"],
-        "ref_mes":             label,
-        "status":              "ativo",
-        "data_fatura":         datetime.now().strftime("%d/%m/%Y %H:%M"),
-        "data_relatorio":      None,
-        "vencimento_fatura":   calc.get("vencimento"),
-    })
+    # Salva a fatura processada como "pendente de relatório" no buffer (dashboard_estado.clientes)
+    base["clientes"][cliente] = {
+        "consumo_faturavel": calc["consumo_faturavel"],
+        "saldo_creditos":    calc["saldo_creditos"],
+        "ref_mes":           label,
+        "valor_sem_desconto":calc["valor_sem_desconto"],
+        "valor_com_desconto":calc["valor_com_desconto"],
+        "creditos_utilizados":dados_pdf["creditos_utilizados"],
+        "tarifa_neo":        cfg["tarifa_neo"],
+        "vencimento_fatura": calc.get("vencimento"),
+        "pendente_relatorio":True,
+    }
+    salvar_base(base["clientes"])
 
-    ativos = [cl for cl in d["clientes"].values() if cl.get("status") == "ativo" and cl.get("ref_mes") == label]
-    d["ref_mes"]             = label
-    d["atualizado_em"]       = datetime.now().strftime("%d/%m/%Y %H:%M")
-    d["faturamento_mes"]     = round(sum(x["valor_com_desconto"] or 0 for x in ativos), 2)
-    d["consumo_mes_kwh"]     = sum(x["consumo_faturavel"] or 0 for x in ativos)
-    d["acumulado_historico"] = round(d["acumulado_historico"] + calc["valor_com_desconto"], 2)
-
-    hist = d["historico_mensal"]
-    ex   = next((h for h in hist if h["mes"] == label), None)
-    if ex:
-        ex["total"] = d["faturamento_mes"]
-    else:
-        hist.append({"mes": label, "total": d["faturamento_mes"]})
-
-    salvar(d)
     return {
         "ok": True, "cliente": cliente, "ref_mes": label,
         "consumo_faturavel":  calc["consumo_faturavel"],
@@ -447,10 +526,10 @@ async def api_relatorio(cliente: str = Form(...), observacoes: str = Form("")):
     if cliente not in CLIENTES_CONFIG:
         raise HTTPException(400, f"Cliente '{cliente}' não encontrado")
 
-    d = carregar()
-    c = d["clientes"].get(cliente, {})
-    if c.get("data_relatorio"):
-        raise HTTPException(409, f"Relatório de {c['ref_mes']} já emitido em {c['data_relatorio']}.")
+    base = carregar_base()
+    c    = base["clientes"].get(cliente, {})
+    if not c.get("pendente_relatorio") or c.get("valor_com_desconto") is None:
+        raise HTTPException(422, f"Nenhuma fatura processada aguardando relatório para {cliente}. Carregue a fatura primeiro.")
 
     try:
         pdf_bytes = gerar_relatorio_pdf(cliente, observacoes)
@@ -459,20 +538,22 @@ async def api_relatorio(cliente: str = Form(...), observacoes: str = Form("")):
     except Exception as e:
         raise HTTPException(500, f"Erro ao gerar PDF: {e}")
 
-    agora = datetime.now().strftime("%d/%m/%Y %H:%M")
-    c["data_relatorio"] = agora
-    salvar(d)
-
-    # ── Registro permanente do relatório emitido ──────────────
+    # ── Registro permanente do relatório emitido (fonte única de verdade) ──
     economia = round((c["valor_sem_desconto"] or 0) - (c["valor_com_desconto"] or 0), 2)
     registrar_relatorio(
-        cliente  = cliente,
-        ref_mes  = c.get("ref_mes","—"),
-        valor    = c.get("valor_com_desconto") or 0,
-        economia = economia,
-        consumo  = c.get("consumo_faturavel") or 0,
-        saldo    = c.get("saldo_creditos") or 0,
+        cliente           = cliente,
+        ref_mes           = c.get("ref_mes","—"),
+        valor             = c.get("valor_com_desconto") or 0,
+        economia          = economia,
+        consumo           = c.get("consumo_faturavel") or 0,
+        saldo             = c.get("saldo_creditos") or 0,
+        vencimento_fatura = c.get("vencimento_fatura"),
     )
+
+    # Limpa o buffer: a fatura deixa de estar "pendente" pois virou relatório oficial
+    c["pendente_relatorio"] = False
+    base["clientes"][cliente] = c
+    salvar_base(base["clientes"])
 
     nome_arquivo = f"Relatorio_{cliente.replace(' ','_')}_{datetime.now().strftime('%Y%m')}.pdf"
     return Response(
@@ -483,30 +564,22 @@ async def api_relatorio(cliente: str = Form(...), observacoes: str = Form("")):
 
 @app.get("/api/historico-relatorios")
 def api_historico_relatorios():
-    """Retorna todos os relatórios já emitidos, do mais recente ao mais antigo."""
-    res = sb.table("relatorios_emitidos").select("*").order("emitido_em", desc=True).execute()
-    return JSONResponse(res.data)
+    """Retorna apenas o relatório mais recente de cada cliente (evita lista infinita)."""
+    relatorios = listar_relatorios_emitidos()
+    ultimos = ultimos_relatorios_por_cliente(relatorios)
+    out = sorted(ultimos.values(), key=lambda r: r["emitido_em"], reverse=True)
+    return JSONResponse(out)
 
 @app.delete("/api/historico-relatorios/{relatorio_id}")
 def api_excluir_relatorio(relatorio_id: int):
-    """Exclui um relatório do log e libera o cliente para reprocessamento."""
+    """Exclui um relatório do log. Todos os números do dashboard recalculam automaticamente
+    na próxima leitura, pois são derivados ao vivo da tabela relatorios_emitidos."""
     res = sb.table("relatorios_emitidos").select("*").eq("id", relatorio_id).execute()
     if not res.data:
         raise HTTPException(404, "Relatório não encontrado.")
     registro = res.data[0]
-    cliente  = registro["cliente"]
-    ref_mes  = registro["ref_mes"]
-
     sb.table("relatorios_emitidos").delete().eq("id", relatorio_id).execute()
-
-    # Libera o cliente para reprocessar fatura/relatório daquele mês, se ainda for o mês atual dele
-    d = carregar()
-    c = d["clientes"].get(cliente)
-    if c and c.get("ref_mes") == ref_mes:
-        c["data_relatorio"] = None
-        salvar(d)
-
-    return {"ok": True, "cliente": cliente, "ref_mes": ref_mes}
+    return {"ok": True, "cliente": registro["cliente"], "ref_mes": registro["ref_mes"]}
 
 # ── HTML ──────────────────────────────────────────────────────
 def html_page(modo: str) -> str:
@@ -810,8 +883,6 @@ select:focus{{border-color:var(--sol)}}
         <th class="r">Tarifa Mtec</th>
         <th class="r">Saldo créditos</th>
         <th>Vencimento</th>
-        <th>Emissão fatura</th>
-        <th>Contrato</th>
       </tr></thead>
       <tbody id="tbody"></tbody>
       <tfoot><tr class="tfoot">
@@ -820,7 +891,7 @@ select:focus{{border-color:var(--sol)}}
         <td class="r" id="t-kwh">—</td>
         <td class="r">—</td>
         <td class="r" id="t-sal">—</td>
-        <td>—</td><td>—</td><td>—</td>
+        <td>—</td>
       </tr></tfoot>
     </table></div>
   </section>
@@ -853,28 +924,30 @@ async function carregar(){{
   document.getElementById("m-kwh").textContent=(d.consumo_mes_kwh||0).toLocaleString("pt-BR");
   document.getElementById("m-acum").textContent=BRL(d.acumulado_historico);
 
-  const ativos=ORDEM.filter(n=>d.clientes[n]?.status==="ativo"&&d.clientes[n]?.ref_mes===d.ref_mes);
+  const ativos=ORDEM.filter(n=>{{
+    const c=d.clientes[n];
+    return c && c.ref_mes===d.ref_mes && !c.aguardando_emissao && c.valor_com_desconto!=null;
+  }});
   document.getElementById("m-fat-sub").textContent=
-    ativos.length ? ativos.map(n=>ABREV[n]||n).join(" · ") : "Nenhum cliente faturado";
+    ativos.length ? ativos.map(n=>ABREV[n]||n).join(" · ") : "Nenhum relatório emitido neste mês";
 
   let tCom=0,tKwh=0,tSal=0,tbody="";
   for(const nome of ORDEM){{
     const c=d.clientes[nome],cf=CFG[nome];
     if(!c||!cf)continue;
-    const pend=c.status==="aguardando";
+    const semFatura=c.valor_com_desconto==null;
     tCom+=c.valor_com_desconto||0;
     tKwh+=c.consumo_faturavel||0;
     tSal+=c.saldo_creditos||0;
-    const relTag=c.data_relatorio?`<span class="tag-rel">✓ ${{c.data_relatorio}}</span>`:"—";
+    const aguardandoEmissao=c.aguardando_emissao;
+    const tagEmissao=aguardandoEmissao?'<span class="note">aguardando emissão</span>':'';
     tbody+=`<tr>
       <td><div class="cn">${{nome}}</div><div class="cc">Cód. ${{cf.cod}} · ${{cf.end}}</div></td>
-      <td class="r">${{pend?'<span class="note">aguardando fatura</span>':'<span class="vd">'+BRL(c.valor_com_desconto)+'</span>'}}</td>
-      <td class="r">${{pend?"—":(c.consumo_faturavel||0).toLocaleString("pt-BR")}}</td>
+      <td class="r">${{semFatura?'<span class="note">sem fatura</span>':'<span class="vd">'+BRL(c.valor_com_desconto)+'</span> '+tagEmissao}}</td>
+      <td class="r">${{semFatura?"—":(c.consumo_faturavel||0).toLocaleString("pt-BR")}}</td>
       <td class="r">${{TAR(cf.tarifa_mtec)}}</td>
-      <td class="r">${{pend?"—":KWH(c.saldo_creditos)}}</td>
-      <td>${{pend?"—":(c.vencimento_fatura||"—")}}</td>
-      <td>${{pend?"—":relTag}}</td>
-      <td><span class="dot ${{pend?'da':'dg'}}"></span>${{pend?"Aguardando":"Ativo"}} · ${{cf.fim}}</td>
+      <td class="r">${{semFatura?"—":KWH(c.saldo_creditos)}}</td>
+      <td>${{c.vencimento_fatura||"—"}}</td>
     </tr>`;
   }}
   document.getElementById("tbody").innerHTML=tbody;
